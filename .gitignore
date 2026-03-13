@@ -1,0 +1,29 @@
+# Python byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Training artefacts
+checkpoints/
+*.safetensors
+*.bin
+runs/
+
+# Logs
+*.log
+slaythetext.log
+
+# OS artefacts
+.DS_Store
+Thumbs.db
