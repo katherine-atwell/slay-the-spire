@@ -1,0 +1,3 @@
+[submodule "sts-agent"]
+	path = sts-agent
+	url = https://github.com/ohylli/sts-agent.git
