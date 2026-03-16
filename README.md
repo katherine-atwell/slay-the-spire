@@ -22,7 +22,89 @@ The agent:
   maximise a reward signal derived from in-game outcomes (floors cleared,
   enemy kills, HP fraction, win/loss).
 
-## Repository structure
+## Quick Start
+
+The steps below cover everything from a fresh clone to a running training loop.
+
+**Prerequisites:** Windows (or WSL with a Windows Python), Slay the Spire with
+the [Text the Spire mod](https://github.com/Wensber/TextTheSpire) installed.
+
+### 1. Clone this repo and install Python dependencies
+
+```bash
+git clone https://github.com/katherine-atwell/slay-the-spire
+cd slay-the-spire
+pip install -r requirements.txt
+```
+
+### 2. Set up sts-agent
+
+```bash
+git clone https://github.com/ohylli/sts-agent sts-agent
+# On Windows:
+pip install -r sts-agent/requirements.txt
+# On WSL (use the Windows Python):
+pip.exe install -r sts-agent/requirements.txt
+```
+
+### 3. Authenticate with Hugging Face (for the Llama model)
+
+```bash
+huggingface-cli login
+```
+
+Request access to `meta-llama/Llama-3.2-3B-Instruct` on Hugging Face if you
+have not already done so.
+
+### 4. Configure paths
+
+Open `config.yaml` and verify (or update) the `environment` section:
+
+```yaml
+environment:
+  sts_tool_path: "sts-agent/src/sts_tool.py"   # path to sts_tool.py
+  python_executable: "python.exe"               # "python.exe" on WSL, "python" on native Windows
+```
+
+### 5. Start the game
+
+Launch Slay the Spire with the **Text the Spire** mod active.  The mod creates
+the accessibility windows that sts-agent reads from.
+
+### 6. Train
+
+```bash
+python -m training.train --config config.yaml
+```
+
+Checkpoints are written to `./checkpoints/`.  To resume or use a different
+config, pass `--config path/to/config.yaml`.
+
+### 7. Play (inference)
+
+```python
+from agent.model import load_model_and_tokenizer
+from agent.agent import SlayTheSpireAgent
+from environment.game_env import StsAgentEnv
+
+model, tokenizer = load_model_and_tokenizer(
+    config_path="config.yaml",
+    adapter_path="./checkpoints/final_adapter",  # omit to use the base model
+)
+agent = SlayTheSpireAgent(model, tokenizer)
+env = StsAgentEnv(sts_tool_path="sts-agent/src/sts_tool.py")
+
+state = env.reset()
+done = False
+while not done:
+    action = agent.act(state)
+    state, reward, done, info = env.step(action)
+    print(f"Action: {action!r}  Reward: {reward:.1f}  Info: {info}")
+
+env.close()
+```
+
+
 
 ```
 slay-the-spire/

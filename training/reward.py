@@ -38,7 +38,7 @@ class RewardConfig:
     """
 
     win_bonus: float = 200.0
-    loss_penalty: float = -50.0
+    loss_penalty: float = -100.0
     floor_cleared_bonus: float = 10.0
     hp_fraction_bonus_scale: float = 20.0
     enemy_killed_bonus: float = 5.0

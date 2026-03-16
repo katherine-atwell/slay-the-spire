@@ -62,7 +62,7 @@ environment:
 
 reward:
   win_bonus: 200.0
-  loss_penalty: -50.0
+  loss_penalty: -100.0
   floor_cleared_bonus: 10.0
   hp_fraction_bonus_scale: 20.0  # max bonus for finishing with full HP
   enemy_killed_bonus: 5.0
