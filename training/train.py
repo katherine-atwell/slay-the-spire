@@ -102,11 +102,13 @@ def _build_reward_fn(reward_cfg: dict):
 # ---------------------------------------------------------------------------
 
 
-def _build_dataset(env_cfg: dict, n_episodes: int = 10):
+def _build_dataset(env_cfg: dict, n_episodes: int = 10, system_prompt: str = ""):
     """Roll out *n_episodes* of the game with a random policy to collect prompts.
 
     Returns a HuggingFace ``Dataset`` with a single ``"prompt"`` column
     containing the game-state strings observed during those episodes.
+    Each entry is formatted as a chat-style message list so that the GRPO
+    trainer can apply the tokenizer's chat template directly.
 
     In production, replace this with the online GRPO loop that rolls out the
     current policy.
@@ -132,14 +134,18 @@ def _build_dataset(env_cfg: dict, n_episodes: int = 10):
     # Simple random actions compatible with sts-agent.
     _random_actions = ["1", "2", "3", "4", "5", "end"]
 
-    prompts: list[str] = []
+    prompts: list[list[dict]] = []
     for ep in range(n_episodes):
         logger.info("Collecting episode %d / %d …", ep + 1, n_episodes)
         try:
             state = env.reset()
             done = False
             while not done:
-                prompts.append(state)
+                messages: list[dict] = []
+                if system_prompt:
+                    messages.append({"role": "system", "content": system_prompt})
+                messages.append({"role": "user", "content": state})
+                prompts.append(messages)
                 action = random.choice(_random_actions)
                 state, _, done, _ = env.step(action)
         except Exception as exc:
@@ -170,7 +176,12 @@ def train(config_path: str = "config.yaml") -> None:
     # 1. Load model + tokeniser
     # ------------------------------------------------------------------
     from agent.model import load_model_and_tokenizer, prepare_model_for_training
-    from agent.system_prompt import SYSTEM_PROMPT
+    from agent.system_prompt import get_character_prompt
+
+    character = cfg.get("agent", {}).get("character", "")
+    system_prompt = get_character_prompt(character)
+    resolved = character.lower() if character.lower() in ("ironclad", "silent", "defect") else "generic"
+    logger.info("Using system prompt for character: %s", resolved)
 
     logger.info("Loading model …")
     model, tokenizer = load_model_and_tokenizer(config_path=config_path)
@@ -180,7 +191,7 @@ def train(config_path: str = "config.yaml") -> None:
     # 2. Build dataset (offline rollouts with random policy)
     # ------------------------------------------------------------------
     logger.info("Collecting game rollouts for dataset …")
-    dataset = _build_dataset(env_cfg, n_episodes=10)
+    dataset = _build_dataset(env_cfg, n_episodes=10, system_prompt=system_prompt)
     logger.info("Dataset size: %d prompts", len(dataset))
 
     # ------------------------------------------------------------------

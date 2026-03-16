@@ -24,7 +24,7 @@ import torch
 if TYPE_CHECKING:
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
-from agent.system_prompt import SYSTEM_PROMPT
+from agent.system_prompt import SYSTEM_PROMPT, get_character_prompt  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
