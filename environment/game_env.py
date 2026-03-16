@@ -1,17 +1,21 @@
-"""Gym-style environment that wraps the slaythetext game as a subprocess.
+"""Gym-style environment that interfaces with Slay the Spire via sts-agent.
 
-The game communicates via stdin/stdout; this module manages the subprocess
-lifecycle, feeds actions, reads state updates, and computes step-level reward
-signals passed to the RL trainer.
+`sts-agent <https://github.com/ohylli/sts-agent>`_ bridges AI agents to a
+running Slay the Spire instance through the Text the Spire accessibility mod.
+This environment calls the ``sts_tool.py`` CLI on each step — there is no
+long-running game subprocess to manage.
 
-Reward computation is fully delegated to :mod:`training.reward` so that the
-environment and the trainer always use the same signals and weights.
+Requirements
+------------
+* Windows OS (sts-agent uses pywinauto/pywin32 for UI automation).
+* Slay the Spire with the Text the Spire mod installed and running.
+* sts-agent cloned: ``git clone https://github.com/ohylli/sts-agent``.
 
 Usage::
 
-    from environment.game_env import SlayTheSpireEnv
+    from environment.game_env import StsAgentEnv
 
-    env = SlayTheSpireEnv(game_script="slaythetext/main.py")
+    env = StsAgentEnv(sts_tool_path="sts-agent/src/sts_tool.py")
     state = env.reset()
     done = False
     while not done:
@@ -22,66 +26,93 @@ Usage::
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import subprocess
 import sys
-import threading
-import time
 from typing import Optional
 
 from training.reward import RewardConfig, compute_step_reward
 
 logger = logging.getLogger(__name__)
 
-# ANSI escape code pattern for stripping colour markup from game output.
-_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[mGKHFABCDJsu]|<[^>]+>")
+# Windows to read from Text the Spire on each step (order determines the
+# formatted game-state string shown to the model).
+_DEFAULT_WINDOWS = ["Player", "Hand", "Monster", "Choices", "Map"]
+
+# Extra seconds added to command_timeout when setting the subprocess hard
+# deadline; ensures the tool has time to report a timeout internally before
+# the subprocess is killed from the outside.
+_SUBPROCESS_TIMEOUT_BUFFER = 10
+
+# Pattern to detect player HP from the Player window, used for done detection.
+_HP_RE = re.compile(r"Health:\s*(\d+)/(\d+)", re.IGNORECASE)
 
 
-def _strip_ansi(text: str) -> str:
-    """Remove ANSI escape codes and angle-bracket markup from *text*."""
-    return _ANSI_RE.sub("", text)
+def _format_state(windows_data: list[dict]) -> str:
+    """Convert a list of window-content dicts into a single human-readable string.
+
+    Each window becomes a labelled section; windows that are unavailable or empty
+    are marked but still included so the model is aware of the context.
+    """
+    parts: list[str] = []
+    for window in windows_data:
+        title = window.get("window_title", "Unknown")
+        error = window.get("error")
+        content = window.get("content", "")
+        if error:
+            parts.append(f"=== {title} ===\n[unavailable: {error}]")
+        elif content.strip():
+            parts.append(f"=== {title} ===\n{content.strip()}")
+    return "\n\n".join(parts)
 
 
-class SlayTheSpireEnv:
-    """A Gym-inspired environment wrapping the slaythetext CLI game.
+class StsAgentEnv:
+    """A Gym-inspired environment wrapping the sts-agent CLI tool.
+
+    Each :meth:`reset` and :meth:`step` call invokes ``sts_tool.py`` as a
+    subprocess (using ``--json`` for machine-readable output).  The resulting
+    game state is the formatted text of all relevant Text the Spire windows.
 
     Parameters
     ----------
-    game_script:
-        Path to ``slaythetext/main.py`` (or any compatible entry point).
+    sts_tool_path:
+        Path to ``sts-agent/src/sts_tool.py``.
     python_executable:
-        Python interpreter used to launch the game subprocess.
-        Defaults to the same interpreter running this module.
+        Python interpreter used to invoke the tool.  On Windows/WSL this
+        should be ``python.exe``; defaults to the current interpreter.
+    windows:
+        List of Text the Spire window names to read on each step.
     max_turns:
-        Maximum number of agent turns before the episode is forcibly ended
-        (prevents infinite loops in degenerate game states).
-    read_timeout:
-        Seconds to wait for the game process to emit output before giving up.
+        Maximum agent turns before the episode is forcibly ended.
+    command_timeout:
+        Per-command timeout (seconds) forwarded to ``sts_tool.py --timeout``.
+    reward_config:
+        Optional :class:`~training.reward.RewardConfig`.
     """
 
     def __init__(
         self,
-        game_script: str = "slaythetext/main.py",
+        sts_tool_path: str = "sts-agent/src/sts_tool.py",
         python_executable: Optional[str] = None,
+        windows: Optional[list[str]] = None,
         max_turns: int = 200,
-        read_timeout: float = 30.0,
+        command_timeout: float = 5.0,
         reward_config: Optional[RewardConfig] = None,
     ) -> None:
-        self.game_script = game_script
+        self.sts_tool_path = sts_tool_path
         self.python_executable = python_executable or sys.executable
+        self.windows = windows or list(_DEFAULT_WINDOWS)
         self.max_turns = max_turns
-        self.read_timeout = read_timeout
+        self.command_timeout = command_timeout
         self._reward_config: RewardConfig = reward_config or RewardConfig()
 
-        self._proc: Optional[subprocess.Popen] = None
-        self._output_buffer: list[str] = []
-        self._reader_thread: Optional[threading.Thread] = None
         self._turn_count: int = 0
         self._done: bool = False
         self._last_state: str = ""
 
-        # Episode-level statistics for reward computation.
+        # Episode-level statistics used by :meth:`_info`.
         self._floors_cleared: int = 0
         self._enemies_killed: int = 0
         self._won: bool = False
@@ -91,51 +122,36 @@ class SlayTheSpireEnv:
     # ------------------------------------------------------------------
 
     def reset(self) -> str:
-        """Start a new game episode and return the initial game state text.
+        """Read all windows and return the current game state as a string.
 
-        Any running subprocess from a previous episode is terminated first.
+        Unlike the previous slaythetext env this does **not** launch a new
+        game process; Slay the Spire must already be running with Text the
+        Spire active.
         """
-        self.close()
-
-        self._output_buffer = []
         self._turn_count = 0
         self._done = False
         self._floors_cleared = 0
         self._enemies_killed = 0
         self._won = False
 
-        logger.info("Launching game: %s %s", self.python_executable, self.game_script)
-        self._proc = subprocess.Popen(
-            [self.python_executable, self.game_script],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
-        )
-
-        # Background thread collects stdout lines into the shared buffer.
-        self._reader_thread = threading.Thread(
-            target=self._read_output_loop, daemon=True
-        )
-        self._reader_thread.start()
-
-        initial_state = self._collect_output()
-        self._last_state = initial_state
-        return initial_state
+        state = self._read_windows()
+        self._last_state = state
+        logger.info("Environment reset; initial state length=%d chars", len(state))
+        return state
 
     def step(self, action: str) -> tuple[str, float, bool, dict]:
-        """Send *action* to the game and return the next observation.
+        """Execute *action* and return the next observation.
 
         Parameters
         ----------
         action:
-            A string action to send to the game (e.g. ``"1"`` or ``"Save"``).
+            A command string accepted by sts-agent, e.g. ``"1"``, ``"end"``,
+            ``"choose 1"``, ``"1,2,end"``, ``"pot u 1"``.
 
         Returns
         -------
         state:
-            The new game state text after the action.
+            Formatted game state after the action.
         reward:
             Scalar reward for this step.
         done:
@@ -143,128 +159,110 @@ class SlayTheSpireEnv:
         info:
             Diagnostic dictionary (floor count, enemy kills, etc.).
         """
-        if self._done or self._proc is None:
+        if self._done:
             return self._last_state, 0.0, True, self._info()
 
         self._turn_count += 1
 
-        # Send action to game.
-        try:
-            self._proc.stdin.write(action + "\n")
-            self._proc.stdin.flush()
-        except BrokenPipeError:
-            logger.warning("Game process pipe broken; ending episode.")
-            self._done = True
-            return self._last_state, 0.0, True, self._info()
+        new_state = self._execute_and_read(action)
+        self._last_state = new_state
 
-        new_output = self._collect_output()
-        self._last_state = new_output
-
-        reward, done = self._compute_reward(new_output)
+        reward, done = self._compute_reward(new_state)
         if self._turn_count >= self.max_turns:
             logger.info("Max turns (%d) reached; ending episode.", self.max_turns)
             done = True
 
         self._done = done
-        return new_output, reward, done, self._info()
+        return new_state, reward, done, self._info()
 
     def close(self) -> None:
-        """Terminate the game subprocess if running."""
-        if self._proc is not None:
-            try:
-                self._proc.stdin.close()
-            except Exception:
-                pass
-            try:
-                self._proc.terminate()
-                self._proc.wait(timeout=5)
-            except Exception:
-                pass
-            self._proc = None
-        if self._reader_thread is not None:
-            self._reader_thread.join(timeout=2)
-            self._reader_thread = None
+        """No-op: sts-agent does not maintain a persistent subprocess."""
 
     # ------------------------------------------------------------------
-    # Internals
+    # Private helpers
     # ------------------------------------------------------------------
 
-    def _read_output_loop(self) -> None:
-        """Continuously read lines from the game's stdout into the buffer."""
-        try:
-            for line in self._proc.stdout:
-                self._output_buffer.append(line)
-        except Exception:
-            pass
+    def _run_tool(self, extra_args: list[str]) -> dict:
+        """Run ``sts_tool.py`` with *extra_args* and return the parsed JSON.
 
-    def _collect_output(self) -> str:
-        """Wait for the game to emit a prompt and return all buffered text.
-
-        Waits until the output looks like a menu/prompt (ends with a question
-        or number-list pattern) or the read timeout expires.
+        Returns an empty dict on timeout or parse failure.
         """
-        deadline = time.monotonic() + self.read_timeout
-        collected: list[str] = []
+        cmd = [
+            self.python_executable,
+            self.sts_tool_path,
+            "--json",
+            "--timeout", str(self.command_timeout),
+        ] + extra_args
+        logger.debug("sts_tool cmd: %s", cmd)
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=self.command_timeout + _SUBPROCESS_TIMEOUT_BUFFER,
+            )
+            if result.stdout.strip():
+                return json.loads(result.stdout)
+            logger.warning(
+                "sts_tool produced no stdout; stderr=%r", result.stderr[:200]
+            )
+            return {}
+        except subprocess.TimeoutExpired:
+            logger.warning("sts_tool timed out for args %s", extra_args)
+            return {}
+        except json.JSONDecodeError as exc:
+            logger.warning("Failed to parse sts_tool JSON: %s", exc)
+            return {}
 
-        while time.monotonic() < deadline:
-            while self._output_buffer:
-                collected.append(self._output_buffer.pop(0))
-            combined = "".join(collected)
-            # Consider output complete when it ends with a prompt-like fragment.
-            if self._looks_complete(combined):
-                break
-            # Also stop if the process has exited.
-            if self._proc is not None and self._proc.poll() is not None:
-                time.sleep(0.1)
-                while self._output_buffer:
-                    collected.append(self._output_buffer.pop(0))
-                break
-            time.sleep(0.05)
+    def _read_windows(self) -> str:
+        """Read all configured windows and return the formatted state."""
+        windows_str = ",".join(self.windows)
+        data = self._run_tool(["--read-window", windows_str])
+        windows_list = data.get("windows", [])
+        if not windows_list and "window_title" in data:
+            # Single-window response — wrap for uniform handling.
+            windows_list = [data]
+        return _format_state(windows_list)
 
-        return _strip_ansi("".join(collected)).strip()
+    def _execute_and_read(self, action: str) -> str:
+        """Execute *action* and read all windows in a single CLI invocation."""
+        windows_str = ",".join(self.windows)
+        data = self._run_tool(["--execute", action, "--read-window", windows_str])
+        windows_list = data.get("windows", [])
+        if not windows_list and "window_title" in data:
+            windows_list = [data]
+        return _format_state(windows_list)
 
-    @staticmethod
-    def _looks_complete(text: str) -> bool:
-        """Return True if *text* appears to be a complete prompt ready for input."""
-        stripped = text.strip()
-        if not stripped:
-            return False
-        # The game ends lines with a newline followed by a blank line or a
-        # numbered option list.  Detect a trailing newline as the simplest
-        # proxy — combined with a brief poll-sleep loop, this works well.
-        last_lines = stripped.rsplit("\n", 5)
-        last_chunk = "\n".join(last_lines[-3:])
-        # Numbered option present or direct question line.
-        if re.search(r"\b\d+\.", last_chunk):
-            return True
-        # "Type" / "Press" / "Pick" indicators.
-        if re.search(r"(Type|Press|Pick|Choose|Enter|input)", last_chunk, re.IGNORECASE):
-            return True
-        return False
-
-    def _compute_reward(self, output: str) -> tuple[float, bool]:
+    def _compute_reward(self, state: str) -> tuple[float, bool]:
         """Delegate reward computation to :mod:`training.reward`.
 
         Also updates episode-level statistics (``_won``, ``_floors_cleared``,
-        ``_enemies_killed``) used by :meth:`_info`.
+        ``_enemies_killed``) used by :meth:`_info`.  In addition, detects
+        player death via the Player window's ``Health: 0/N`` pattern.
         """
         cfg = getattr(self, "_reward_config", None) or RewardConfig()
-        reward, done = compute_step_reward(output, cfg)
+        reward, done = compute_step_reward(state, cfg)
+
         if done and reward > 0:
             self._won = True
             logger.info("Episode ended: WIN")
         elif done and reward < 0:
             logger.info("Episode ended: LOSS")
         else:
-            # Update cumulative statistics from the reward module's patterns.
-            from training.reward import (
-                _ENEMY_KILLED_RE,
-                _FLOOR_ADVANCE_RE,
-            )
-            if _ENEMY_KILLED_RE.search(output):
-                self._enemies_killed += len(_ENEMY_KILLED_RE.findall(output))
-            if _FLOOR_ADVANCE_RE.search(output):
+            from training.reward import _ENEMY_KILLED_RE, _FLOOR_ADVANCE_RE
+
+            if _ENEMY_KILLED_RE.search(state):
+                self._enemies_killed += len(_ENEMY_KILLED_RE.findall(state))
+            if _FLOOR_ADVANCE_RE.search(state):
                 self._floors_cleared += 1
+
+            # Detect player death from the Player window HP field.
+            hp_match = _HP_RE.search(state)
+            if hp_match and int(hp_match.group(1)) == 0:
+                reward += cfg.loss_penalty
+                done = True
+                logger.info("Episode ended: player HP reached 0")
+
         return reward, done
 
     def _info(self) -> dict:
@@ -276,3 +274,4 @@ class SlayTheSpireEnv:
             "won": self._won,
             "done": self._done,
         }
+

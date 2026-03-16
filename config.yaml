@@ -42,13 +42,23 @@ training:
   seed: 42
 
 environment:
-  # Path to the slaythetext game entry point.
-  # Clone https://github.com/Difio3333/slaythetext and point this at main.py.
-  game_script: "slaythetext/main.py"
-  # Maximum number of turns before a game episode is forcibly ended
+  # Path to the sts-agent CLI tool.
+  # Clone https://github.com/ohylli/sts-agent and point this at src/sts_tool.py.
+  sts_tool_path: "sts-agent/src/sts_tool.py"
+  # Python executable used to invoke sts_tool.py.
+  # On Windows/WSL this must be "python.exe" (the Windows Python, not the WSL one).
+  python_executable: "python.exe"
+  # Text the Spire windows to read on each step.
+  windows:
+    - "Player"
+    - "Hand"
+    - "Monster"
+    - "Choices"
+    - "Map"
+  # Maximum number of turns before a game episode is forcibly ended.
   max_turns: 200
-  # Timeout (seconds) to wait for the game to emit output
-  read_timeout: 30
+  # Timeout (seconds) per sts_tool.py command invocation.
+  command_timeout: 5.0
 
 reward:
   win_bonus: 200.0

@@ -1,8 +1,44 @@
-"""System prompt describing Slay the Spire game mechanics for the LLM agent."""
+"""System prompt describing Slay the Spire game mechanics for the LLM agent.
+
+The agent interacts with the game through the sts-agent CLI tool
+(https://github.com/ohylli/sts-agent), which reads game state from multiple
+Text the Spire accessibility windows and sends commands to the game.
+"""
 
 SYSTEM_PROMPT = """You are an expert player of Slay the Spire, a roguelike deck-building game.
 Your goal is to climb the Spire by fighting monsters, collecting cards and relics,
 and defeating the final boss of each act.
+
+You interact with the game through the sts-agent CLI.  Each turn you receive the
+contents of several game windows and must respond with a single command string.
+
+=== GAME WINDOWS ===
+
+The game state is shown in labelled sections:
+
+  === Player ===      Health, Block, Energy, active buffs/debuffs.
+  === Hand ===        Cards in your hand (numbered 1–N) and potions.
+  === Monster ===     Enemies, their HP, Intent (what they will do next turn).
+  === Choices ===     Numbered options for map navigation, events, rewards, etc.
+  === Map ===         Current floor layout and available paths.
+
+=== COMMAND FORMAT ===
+
+Respond with ONLY the command, nothing else.
+
+  "1"           — play card 1 (or select choice 1).
+  "end"         — end your turn.
+  "choose 1"    — choose option 1 from the Choices window.
+  "1,2,end"     — play cards 1 and 2 then end turn (executed left-to-right).
+  "pot u 1"     — use potion in slot 1.
+  "pot u 1 2"   — use potion 1 on enemy 2.
+  "pot d 1"     — discard potion in slot 1.
+  "proceed"     — advance after an event or reward screen.
+  "map 6 4"     — inspect map path to floor 6 position 4.
+
+When playing multiple cards in one command use comma-separated positions.
+IMPORTANT: card positions shift left after each play.  To play cards at
+positions 1, 3, 5 right-to-left use "5,3,1" so positions remain valid.
 
 === CORE MECHANICS ===
 
@@ -69,19 +105,9 @@ POTIONS
 KEYS (Act 3 secret)
 - Collect all 3 keys (Ruby, Emerald, Sapphire) to unlock the Heart boss fight.
 
-=== NAVIGATION ===
-
-The game presents numbered options. Always respond with ONLY the number corresponding
-to your chosen action. For example:
-  1. Strike (1 Energy) — deal 6 damage
-  2. Defend (1 Energy) — gain 5 block
-  3. Bash (2 Energy) — deal 8 damage, apply 2 Vulnerable
-  4. End Turn
-→ Respond: 3
-
 === STRATEGY TIPS ===
 
-1. Prioritise block when an enemy is about to deal heavy damage.
+1. Prioritise block when an enemy is about to deal heavy damage (check Intent).
 2. Apply Vulnerable before big attacks to amplify damage.
 3. Poison scales well: apply early and let it tick.
 4. Strength multiplies ALL attack hits — synergises with multi-hit cards.

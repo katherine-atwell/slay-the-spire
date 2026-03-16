@@ -113,17 +113,24 @@ def _build_dataset(env_cfg: dict, n_episodes: int = 10):
     """
     import random
     from datasets import Dataset
-    from environment.game_env import SlayTheSpireEnv
+    from environment.game_env import StsAgentEnv
 
-    game_script = env_cfg.get("game_script", "slaythetext/main.py")
+    sts_tool_path = env_cfg.get("sts_tool_path", "sts-agent/src/sts_tool.py")
+    python_executable = env_cfg.get("python_executable", "python.exe")
+    windows = env_cfg.get("windows", None)
     max_turns = env_cfg.get("max_turns", 200)
-    read_timeout = env_cfg.get("read_timeout", 30)
+    command_timeout = float(env_cfg.get("command_timeout", 5.0))
 
-    env = SlayTheSpireEnv(
-        game_script=game_script,
+    env = StsAgentEnv(
+        sts_tool_path=sts_tool_path,
+        python_executable=python_executable,
+        windows=windows,
         max_turns=max_turns,
-        read_timeout=float(read_timeout),
+        command_timeout=command_timeout,
     )
+
+    # Simple random actions compatible with sts-agent.
+    _random_actions = ["1", "2", "3", "4", "5", "end"]
 
     prompts: list[str] = []
     for ep in range(n_episodes):
@@ -133,8 +140,7 @@ def _build_dataset(env_cfg: dict, n_episodes: int = 10):
             done = False
             while not done:
                 prompts.append(state)
-                # Random policy: choose a digit 1–9 uniformly.
-                action = str(random.randint(1, 9))
+                action = random.choice(_random_actions)
                 state, _, done, _ = env.step(action)
         except Exception as exc:
             logger.warning("Episode %d failed: %s", ep + 1, exc)

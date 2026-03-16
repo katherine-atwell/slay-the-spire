@@ -1,74 +1,60 @@
-"""Tests for the game environment wrapper."""
+"""Tests for the sts-agent game environment wrapper."""
 from __future__ import annotations
 
-import threading
-import time
+import json
 import unittest
-from io import StringIO
 from unittest.mock import MagicMock, patch
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# Unit tests for _format_state helper
 # ---------------------------------------------------------------------------
 
 
-def _make_fake_proc(stdout_lines: list[str], returncode: int = 0):
-    """Build a mock subprocess.Popen compatible object."""
-    proc = MagicMock()
-    proc.poll.return_value = returncode  # process has exited
-    # stdin is writable
-    proc.stdin = MagicMock()
-    proc.stdin.write = MagicMock()
-    proc.stdin.flush = MagicMock()
-    proc.stdin.close = MagicMock()
-    proc.terminate = MagicMock()
-    proc.wait = MagicMock()
-    # stdout is an iterable of lines
-    proc.stdout = iter(stdout_lines)
-    return proc
+class TestFormatState(unittest.TestCase):
+    def test_formats_player_window(self):
+        from environment.game_env import _format_state
 
+        windows = [
+            {"window_title": "Player", "content": "Health: 80/80\nEnergy: 3", "error": None},
+        ]
+        result = _format_state(windows)
+        assert "=== Player ===" in result
+        assert "Health: 80/80" in result
 
-# ---------------------------------------------------------------------------
-# Unit tests for internal helpers
-# ---------------------------------------------------------------------------
+    def test_formats_multiple_windows(self):
+        from environment.game_env import _format_state
 
+        windows = [
+            {"window_title": "Player", "content": "Health: 80/80\nEnergy: 3", "error": None},
+            {"window_title": "Hand", "content": "1:Strike 1\n2:Defend 1", "error": None},
+        ]
+        result = _format_state(windows)
+        assert "Player" in result
+        assert "Hand" in result
+        assert "Strike" in result
 
-class TestStripAnsi(unittest.TestCase):
-    def test_strips_ansi_codes(self):
-        from environment.game_env import _strip_ansi
+    def test_marks_unavailable_window(self):
+        from environment.game_env import _format_state
 
-        assert _strip_ansi("\x1b[31mRed\x1b[0m") == "Red"
+        windows = [
+            {"window_title": "Monster", "content": "", "error": "Window not found"},
+        ]
+        result = _format_state(windows)
+        assert "unavailable" in result
+        assert "Monster" in result
 
-    def test_strips_angle_bracket_markup(self):
-        from environment.game_env import _strip_ansi
+    def test_skips_empty_content_no_error(self):
+        from environment.game_env import _format_state
 
-        assert _strip_ansi("<red>Enemy</red>") == "Enemy"
-
-    def test_plain_text_unchanged(self):
-        from environment.game_env import _strip_ansi
-
-        plain = "Pick an option:\n1. Strike\n2. Defend"
-        assert _strip_ansi(plain) == plain
-
-
-class TestLooksComplete(unittest.TestCase):
-    def test_numbered_option_detected(self):
-        from environment.game_env import SlayTheSpireEnv
-
-        text = "What do you do?\n1. Strike\n2. Defend"
-        assert SlayTheSpireEnv._looks_complete(text) is True
-
-    def test_type_prompt_detected(self):
-        from environment.game_env import SlayTheSpireEnv
-
-        text = "Type your choice."
-        assert SlayTheSpireEnv._looks_complete(text) is True
-
-    def test_empty_string_not_complete(self):
-        from environment.game_env import SlayTheSpireEnv
-
-        assert SlayTheSpireEnv._looks_complete("") is False
+        windows = [
+            {"window_title": "Map", "content": "", "error": None},
+            {"window_title": "Player", "content": "Health: 50/80", "error": None},
+        ]
+        result = _format_state(windows)
+        # Map has no content and no error — should be omitted from output
+        assert "=== Map ===" not in result
+        assert "Player" in result
 
 
 # ---------------------------------------------------------------------------
@@ -78,9 +64,13 @@ class TestLooksComplete(unittest.TestCase):
 
 class TestComputeReward(unittest.TestCase):
     def _env(self):
-        from environment.game_env import SlayTheSpireEnv
+        from environment.game_env import StsAgentEnv
 
-        return SlayTheSpireEnv.__new__(SlayTheSpireEnv)
+        env = StsAgentEnv.__new__(StsAgentEnv)
+        env._won = False
+        env._floors_cleared = 0
+        env._enemies_killed = 0
+        return env
 
     def test_win_phrase_gives_positive_reward(self):
         env = self._env()
@@ -90,104 +80,175 @@ class TestComputeReward(unittest.TestCase):
 
     def test_loss_phrase_gives_negative_reward(self):
         env = self._env()
-        env._won = False
         reward, done = env._compute_reward("You have lost!")
         assert reward < 0
         assert done is True
 
     def test_enemy_killed_gives_bonus(self):
         env = self._env()
-        env._enemies_killed = 0
-        env._floors_cleared = 0
-        env._won = False
         reward, done = env._compute_reward("The Cultist has been defeated.")
         assert reward > 0
         assert done is False
 
     def test_floor_advance_gives_bonus(self):
         env = self._env()
-        env._enemies_killed = 0
-        env._floors_cleared = 0
-        env._won = False
         reward, done = env._compute_reward("You have entered floor 3.")
         assert reward > 0
         assert done is False
 
     def test_invalid_input_gives_penalty(self):
         env = self._env()
-        env._enemies_killed = 0
-        env._floors_cleared = 0
-        env._won = False
         reward, done = env._compute_reward("You have to type a number.")
         assert reward < 0
         assert done is False
 
+    def test_player_hp_nonzero_no_death_penalty(self):
+        env = self._env()
+        state = "=== Player ===\nHealth: 55/80\nEnergy: 3"
+        reward, done = env._compute_reward(state)
+        # Non-zero HP should not trigger the death-penalty path
+        assert done is False
+
+    def test_player_hp_zero_gives_penalty(self):
+        env = self._env()
+        # Simulate Player window content with 0 HP
+        state = "=== Player ===\nHealth: 0/80\nEnergy: 3"
+        reward, done = env._compute_reward(state)
+        assert reward < 0
+        assert done is True
+
 
 # ---------------------------------------------------------------------------
-# SlayTheSpireEnv lifecycle (subprocess mocked)
+# StsAgentEnv lifecycle tests (CLI calls mocked)
 # ---------------------------------------------------------------------------
 
 
-class TestEnvLifecycle(unittest.TestCase):
-    @patch("environment.game_env.subprocess.Popen")
-    def test_reset_starts_process(self, MockPopen):
-        from environment.game_env import SlayTheSpireEnv
+class TestStsAgentEnvLifecycle(unittest.TestCase):
+    def _multi_window_response(self):
+        return {
+            "windows": [
+                {"window_title": "Player", "content": "Health: 80/80\nEnergy: 3", "error": None},
+                {"window_title": "Hand", "content": "1:Strike 1\n2:Defend 1", "error": None},
+                {"window_title": "Monster", "content": "Cultist HP: 50/50\nIntent: Ritual", "error": None},
+                {"window_title": "Choices", "content": "", "error": None},
+                {"window_title": "Map", "content": "Floor 1", "error": None},
+            ]
+        }
 
-        lines = [
-            "Slay the Spire\n",
-            "Pick the Character you want to play.\n",
-            "1. Silent\n",
-            "2. Ironclad\n",
-            "3. Defect\n",
-        ]
-        MockPopen.return_value = _make_fake_proc(lines)
+    @patch("environment.game_env.StsAgentEnv._run_tool")
+    def test_reset_reads_windows(self, mock_run_tool):
+        from environment.game_env import StsAgentEnv
 
-        env = SlayTheSpireEnv(game_script="fake/main.py", read_timeout=1.0)
+        mock_run_tool.return_value = self._multi_window_response()
+        env = StsAgentEnv()
         state = env.reset()
+
         assert isinstance(state, str)
-        env.close()
+        assert "Player" in state
+        assert "Health: 80/80" in state
+        mock_run_tool.assert_called_once()
 
-    @patch("environment.game_env.subprocess.Popen")
-    def test_step_sends_action(self, MockPopen):
-        from environment.game_env import SlayTheSpireEnv
+    @patch("environment.game_env.StsAgentEnv._run_tool")
+    def test_step_calls_execute_then_read(self, mock_run_tool):
+        from environment.game_env import StsAgentEnv
 
-        lines = [
-            "Pick your character.\n",
-            "1. Silent\n",
-            "You chose the Silent.\n",
-        ]
-        proc = _make_fake_proc(lines)
-        MockPopen.return_value = proc
-
-        env = SlayTheSpireEnv(game_script="fake/main.py", read_timeout=1.0)
+        mock_run_tool.return_value = self._multi_window_response()
+        env = StsAgentEnv()
         env.reset()
+
+        mock_run_tool.reset_mock()
+        mock_run_tool.return_value = self._multi_window_response()
+
         state, reward, done, info = env.step("1")
-        proc.stdin.write.assert_called()
+
+        # step() calls _execute_and_read which calls _run_tool once
+        mock_run_tool.assert_called_once()
+        args, _ = mock_run_tool.call_args
+        cmd_args = args[0]
+        assert "--execute" in cmd_args
+        assert "1" in cmd_args
+        assert "--read-window" in cmd_args
+
         assert isinstance(reward, float)
         assert isinstance(done, bool)
-        env.close()
+        assert info["turn"] == 1
 
-    def test_close_is_idempotent(self):
-        from environment.game_env import SlayTheSpireEnv
+    def test_close_is_noop(self):
+        from environment.game_env import StsAgentEnv
 
-        env = SlayTheSpireEnv(game_script="fake/main.py")
-        env.close()  # no subprocess was started
-        env.close()  # second call must not raise
+        env = StsAgentEnv()
+        env.close()  # should not raise
+        env.close()  # idempotent
 
-    @patch("environment.game_env.subprocess.Popen")
-    def test_max_turns_ends_episode(self, MockPopen):
-        from environment.game_env import SlayTheSpireEnv
+    @patch("environment.game_env.StsAgentEnv._run_tool")
+    def test_max_turns_ends_episode(self, mock_run_tool):
+        from environment.game_env import StsAgentEnv
 
-        proc = _make_fake_proc(["Game output\n1. Option\n"])
-        MockPopen.return_value = proc
-
-        env = SlayTheSpireEnv(game_script="fake/main.py", max_turns=1, read_timeout=0.5)
+        mock_run_tool.return_value = self._multi_window_response()
+        env = StsAgentEnv(max_turns=1)
         env.reset()
+
+        mock_run_tool.return_value = self._multi_window_response()
         _, _, done, info = env.step("1")
+
         assert done is True
         assert info["turn"] == 1
-        env.close()
+
+    @patch("environment.game_env.StsAgentEnv._run_tool")
+    def test_step_after_done_returns_immediately(self, mock_run_tool):
+        from environment.game_env import StsAgentEnv
+
+        mock_run_tool.return_value = self._multi_window_response()
+        env = StsAgentEnv(max_turns=1)
+        env.reset()
+
+        mock_run_tool.return_value = self._multi_window_response()
+        env.step("1")  # triggers max_turns, done=True
+
+        mock_run_tool.reset_mock()
+        _, _, done, _ = env.step("end")  # should not call _run_tool again
+        mock_run_tool.assert_not_called()
+        assert done is True
+
+    @patch("environment.game_env.StsAgentEnv._run_tool")
+    def test_run_tool_timeout_returns_empty_state(self, mock_run_tool):
+        from environment.game_env import StsAgentEnv
+
+        mock_run_tool.return_value = {}  # simulate timeout / parse failure
+        env = StsAgentEnv()
+        state = env.reset()
+        # Should not raise; returns empty string
+        assert isinstance(state, str)
+
+    @patch("environment.game_env.StsAgentEnv._run_tool")
+    def test_info_tracks_enemies_killed(self, mock_run_tool):
+        from environment.game_env import StsAgentEnv
+
+        # First reset
+        mock_run_tool.return_value = self._multi_window_response()
+        env = StsAgentEnv()
+        env.reset()
+
+        # Step with an "enemy defeated" message
+        kill_response = {
+            "windows": [
+                {
+                    "window_title": "Player",
+                    "content": "Health: 70/80\nEnergy: 3",
+                    "error": None,
+                },
+                {
+                    "window_title": "Hand",
+                    "content": "The Cultist has been defeated.\n1:Strike 1",
+                    "error": None,
+                },
+            ]
+        }
+        mock_run_tool.return_value = kill_response
+        _, _, _, info = env.step("1")
+        assert info["enemies_killed"] >= 1
 
 
 if __name__ == "__main__":
     unittest.main()
+

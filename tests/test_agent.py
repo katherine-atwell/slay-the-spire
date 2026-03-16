@@ -70,7 +70,9 @@ class TestSystemPrompt(unittest.TestCase):
         assert "STRATEGY TIPS" in SYSTEM_PROMPT
 
     def test_navigation_section(self):
-        assert "NAVIGATION" in SYSTEM_PROMPT
+        # System prompt now describes sts-agent command syntax instead of a
+        # generic navigation section.
+        assert "COMMAND FORMAT" in SYSTEM_PROMPT
 
     def test_non_empty(self):
         assert len(SYSTEM_PROMPT) > 500
@@ -106,6 +108,23 @@ class TestParseAction(unittest.TestCase):
 
     def test_multi_digit(self):
         assert self.parse("12") == "12"
+
+    def test_end_keyword(self):
+        assert self.parse("end") == "end"
+
+    def test_comma_separated_multi_action(self):
+        assert self.parse("1,2,end") == "1,2,end"
+
+    def test_choose_command(self):
+        assert self.parse("choose 1") == "choose 1"
+
+    def test_pot_command(self):
+        assert self.parse("pot u 1") == "pot u 1"
+
+    def test_prose_before_command_stripped(self):
+        # Model may explain reasoning then give the command on a new line.
+        result = self.parse("I will play Strike first.\nend")
+        assert result == "end"
 
 
 # ---------------------------------------------------------------------------
