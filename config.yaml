@@ -1,0 +1,69 @@
+# Training configuration for the Slay the Spire LLM agent
+
+model:
+  name: "meta-llama/Llama-3.2-3B-Instruct"
+  load_in_4bit: true
+  bnb_4bit_compute_dtype: "float16"   # use float16 on CPU/GPU hybrid systems
+  bnb_4bit_quant_type: "nf4"          # NormalFloat4 for best quality
+  bnb_4bit_use_double_quant: true     # double quantisation saves ~0.4 bits/param
+
+peft:
+  r: 16
+  lora_alpha: 32
+  lora_dropout: 0.05
+  target_modules:
+    - "q_proj"
+    - "k_proj"
+    - "v_proj"
+    - "o_proj"
+    - "gate_proj"
+    - "up_proj"
+    - "down_proj"
+  bias: "none"
+  task_type: "CAUSAL_LM"
+
+training:
+  output_dir: "./checkpoints"
+  num_train_epochs: 3
+  # GRPO-specific settings
+  num_generations: 4            # completions sampled per prompt for ranking
+  max_prompt_length: 1024
+  max_completion_length: 256
+  learning_rate: 2.0e-5
+  per_device_train_batch_size: 1
+  gradient_accumulation_steps: 4
+  gradient_checkpointing: true
+  optim: "paged_adamw_8bit"
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+  logging_steps: 10
+  save_steps: 100
+  max_grad_norm: 1.0
+  seed: 42
+
+environment:
+  # Path to the sts-agent CLI tool.
+  # Clone https://github.com/ohylli/sts-agent and point this at src/sts_tool.py.
+  sts_tool_path: "sts-agent/src/sts_tool.py"
+  # Python executable used to invoke sts_tool.py.
+  # On Windows/WSL this must be "python.exe" (the Windows Python, not the WSL one).
+  python_executable: "python.exe"
+  # Text the Spire windows to read on each step.
+  windows:
+    - "Player"
+    - "Hand"
+    - "Monster"
+    - "Choices"
+    - "Map"
+  # Maximum number of turns before a game episode is forcibly ended.
+  max_turns: 200
+  # Timeout (seconds) per sts_tool.py command invocation.
+  command_timeout: 5.0
+
+reward:
+  win_bonus: 200.0
+  loss_penalty: -100.0
+  floor_cleared_bonus: 10.0
+  hp_fraction_bonus_scale: 20.0  # max bonus for finishing with full HP
+  enemy_killed_bonus: 5.0
+  invalid_action_penalty: -2.0
