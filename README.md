@@ -26,8 +26,11 @@ The agent:
 
 The steps below cover everything from a fresh clone to a running training loop.
 
-**Prerequisites:** Windows (or WSL with a Windows Python), Slay the Spire with
-the [Text the Spire mod](https://github.com/Wensber/TextTheSpire) installed.
+**Prerequisites:** Windows (or WSL with a Windows Python) **for the default
+`sts_agent` interface mode**.  If you set `interface_mode: "text_the_spire"` in
+`config.yaml`, the agent communicates with the mod through plain files and runs
+on **any platform** (Linux, macOS, Windows) — see
+[Interface modes](#interface-modes) below.
 
 ### 1. Clone this repo and install Python dependencies
 
@@ -62,8 +65,16 @@ Open `config.yaml` and verify (or update) the `environment` section:
 
 ```yaml
 environment:
-  sts_tool_path: "sts-agent/src/sts_tool.py"   # path to sts_tool.py
-  python_executable: "python.exe"               # "python.exe" on WSL, "python" on native Windows
+  # "sts_agent" (default, Windows only) or "text_the_spire" (cross-platform)
+  interface_mode: "sts_agent"
+
+  # sts_agent mode — path to sts_tool.py and Python executable
+  sts_tool_path: "sts-agent/src/sts_tool.py"
+  python_executable: "python.exe"   # "python.exe" on WSL, "python" on native Windows
+
+  # text_the_spire mode — directory of state files and command input file
+  text_the_spire_state_dir: "."
+  text_the_spire_input_file: "sts_input.txt"
 ```
 
 ### 5. Start the game
@@ -83,16 +94,18 @@ config, pass `--config path/to/config.yaml`.
 ### 7. Play (inference)
 
 ```python
+import yaml
 from agent.model import load_model_and_tokenizer
 from agent.agent import SlayTheSpireAgent
-from environment.game_env import StsAgentEnv
+from environment.game_env import make_env
 
 model, tokenizer = load_model_and_tokenizer(
     config_path="config.yaml",
     adapter_path="./checkpoints/final_adapter",  # omit to use the base model
 )
 agent = SlayTheSpireAgent(model, tokenizer)
-env = StsAgentEnv(sts_tool_path="sts-agent/src/sts_tool.py")
+cfg = yaml.safe_load(open("config.yaml"))
+env = make_env(cfg["environment"])   # respects interface_mode in config.yaml
 
 state = env.reset()
 done = False
@@ -115,7 +128,7 @@ slay-the-spire/
 │   ├── model.py             # 4-bit quantised Llama 3.2:3B loading + LoRA setup
 │   └── system_prompt.py     # Game-mechanics system prompt + sts-agent command syntax
 ├── environment/
-│   └── game_env.py          # Gym-style env wrapping the sts-agent CLI tool
+│   └── game_env.py          # Gym-style env; supports sts_agent and text_the_spire modes
 ├── training/
 │   ├── reward.py            # Composable reward functions
 │   └── train.py             # GRPO training entry point
@@ -125,9 +138,60 @@ slay-the-spire/
     └── test_reward.py
 ```
 
+## Interface modes
+
+The agent can communicate with Slay the Spire in two ways, controlled by
+`environment.interface_mode` in `config.yaml`.
+
+### `sts_agent` (default, Windows only)
+
+Uses the [sts-agent](https://github.com/ohylli/sts-agent) CLI tool, which
+reads game state from the Windows accessibility windows created by the Text
+the Spire mod (via pywinauto / pywin32).
+
+Set up:
+
+```bash
+git clone https://github.com/ohylli/sts-agent sts-agent
+pip install -r sts-agent/requirements.txt    # or pip.exe in WSL
+```
+
+Then in `config.yaml`:
+
+```yaml
+environment:
+  interface_mode: "sts_agent"
+  sts_tool_path: "sts-agent/src/sts_tool.py"
+  python_executable: "python.exe"   # "python.exe" on WSL, "python" on Windows
+```
+
+### `text_the_spire` (cross-platform)
+
+Interfaces directly with the [Text the Spire](https://github.com/Wensber/TextTheSpire)
+mod by reading per-window state files the mod writes to a directory and by
+writing commands to a shared input file that the mod monitors.  This back-end
+has **no Windows-only dependencies** and works on Linux, macOS, and Windows.
+
+Configure the mod to write state files to a directory (e.g. `/tmp/sts_state`)
+and monitor a command file (e.g. `/tmp/sts_state/sts_input.txt`), then update
+`config.yaml`:
+
+```yaml
+environment:
+  interface_mode: "text_the_spire"
+  text_the_spire_state_dir: "/tmp/sts_state"    # directory with Player.txt, Hand.txt, …
+  text_the_spire_input_file: "/tmp/sts_state/sts_input.txt"
+```
+
+The mod writes one `.txt` file per window (e.g. `Player.txt`, `Hand.txt`,
+`Monster.txt`, `Choices.txt`, `Map.txt`) and the agent writes the chosen
+action as a single line to `sts_input.txt`.
+
 ## Requirements
 
-- **Windows** (sts-agent uses pywinauto/pywin32 for UI automation).
+- **Windows** required only for the default `sts_agent` interface mode
+  (sts-agent uses pywinauto/pywin32 for UI automation).  The
+  `text_the_spire` mode works on any OS.
   On WSL, invoke sts-agent with `python.exe` (the Windows Python).
 - Python 3.10 or later
 - ~64 GB RAM (the 4-bit model uses ~1.7 GB for weights; the rest is for
@@ -142,7 +206,8 @@ pip install -r requirements.txt
 
 ### sts-agent
 
-Clone the interface tool and install its dependencies:
+Only needed for the `sts_agent` interface mode.  Clone the interface tool and
+install its dependencies:
 
 ```bash
 git clone https://github.com/ohylli/sts-agent sts-agent
@@ -182,16 +247,19 @@ The script will:
 ### Inference (playing a game)
 
 ```python
+import yaml
 from agent.model import load_model_and_tokenizer
 from agent.agent import SlayTheSpireAgent
-from environment.game_env import StsAgentEnv
+from environment.game_env import make_env
 
 model, tokenizer = load_model_and_tokenizer(
     config_path="config.yaml",
     adapter_path="./checkpoints/final_adapter",  # omit to use base model
 )
 agent = SlayTheSpireAgent(model, tokenizer)
-env = StsAgentEnv(sts_tool_path="sts-agent/src/sts_tool.py")
+
+cfg = yaml.safe_load(open("config.yaml"))
+env = make_env(cfg["environment"])   # respects interface_mode in config.yaml
 
 state = env.reset()
 done = False
@@ -218,7 +286,7 @@ All hyperparameters live in `config.yaml`.  Key sections:
 | `model` | `name`, `load_in_4bit`, `bnb_4bit_quant_type` |
 | `peft` | `r` (LoRA rank), `lora_alpha`, `target_modules` |
 | `training` | `num_train_epochs`, `num_generations` (GRPO group size), `learning_rate` |
-| `environment` | `sts_tool_path`, `python_executable`, `windows`, `max_turns`, `command_timeout` |
+| `environment` | `interface_mode`, `sts_tool_path`, `python_executable`, `text_the_spire_state_dir`, `text_the_spire_input_file`, `windows`, `max_turns`, `command_timeout` |
 | `reward` | `win_bonus`, `floor_cleared_bonus`, `enemy_killed_bonus`, … |
 
 ## System prompt

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -247,6 +248,201 @@ class TestStsAgentEnvLifecycle(unittest.TestCase):
         mock_run_tool.return_value = kill_response
         _, _, _, info = env.step("1")
         assert info["enemies_killed"] >= 1
+
+
+# ---------------------------------------------------------------------------
+# TextTheSpireEnv tests (file-system calls mocked / using tmp dirs)
+# ---------------------------------------------------------------------------
+
+
+class TestTextTheSpireEnv(unittest.TestCase):
+    """Tests for the cross-platform TextTheSpireEnv back-end."""
+
+    def _write_window_files(self, tmp_dir: str, windows: dict[str, str]) -> None:
+        """Helper: write window content to ``<tmp_dir>/<name>.txt``."""
+        for name, content in windows.items():
+            with open(os.path.join(tmp_dir, f"{name}.txt"), "w", encoding="utf-8") as fh:
+                fh.write(content)
+
+    def test_reset_reads_window_files(self):
+        import tempfile
+        from environment.game_env import TextTheSpireEnv
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_window_files(tmp, {
+                "Player": "Health: 80/80\nEnergy: 3",
+                "Hand": "1:Strike 1\n2:Defend 1",
+                "Monster": "Cultist HP: 50/50\nIntent: Ritual",
+                "Choices": "",
+                "Map": "Floor 1",
+            })
+            env = TextTheSpireEnv(
+                state_dir=tmp,
+                input_file=os.path.join(tmp, "sts_input.txt"),
+                windows=["Player", "Hand", "Monster", "Map"],
+            )
+            state = env.reset()
+
+        assert "Player" in state
+        assert "Health: 80/80" in state
+        assert "Hand" in state
+        assert "Strike" in state
+
+    def test_step_writes_command_file(self):
+        import tempfile
+        from environment.game_env import TextTheSpireEnv
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_window_files(tmp, {
+                "Player": "Health: 80/80\nEnergy: 3",
+                "Hand": "1:Strike 1",
+            })
+            input_path = os.path.join(tmp, "sts_input.txt")
+            env = TextTheSpireEnv(
+                state_dir=tmp,
+                input_file=input_path,
+                windows=["Player", "Hand"],
+            )
+            env.reset()
+            env.step("end")
+
+            with open(input_path, encoding="utf-8") as fh:
+                written = fh.read()
+        assert written.strip() == "end"
+
+    def test_missing_window_file_returns_error_in_state(self):
+        import tempfile
+        from environment.game_env import TextTheSpireEnv
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # Only write Player; Monster is missing
+            self._write_window_files(tmp, {"Player": "Health: 70/80\nEnergy: 3"})
+            env = TextTheSpireEnv(
+                state_dir=tmp,
+                input_file=os.path.join(tmp, "sts_input.txt"),
+                windows=["Player", "Monster"],
+                command_timeout=0.1,  # short timeout so test runs fast
+            )
+            state = env.reset()
+
+        assert "Player" in state
+        assert "Monster" in state
+        assert "unavailable" in state
+
+    def test_max_turns_ends_episode(self):
+        import tempfile
+        from environment.game_env import TextTheSpireEnv
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_window_files(tmp, {"Player": "Health: 80/80\nEnergy: 3"})
+            env = TextTheSpireEnv(
+                state_dir=tmp,
+                input_file=os.path.join(tmp, "sts_input.txt"),
+                windows=["Player"],
+                max_turns=1,
+            )
+            env.reset()
+            _, _, done, info = env.step("1")
+
+        assert done is True
+        assert info["turn"] == 1
+
+    def test_step_after_done_returns_immediately(self):
+        import tempfile
+        from environment.game_env import TextTheSpireEnv
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_window_files(tmp, {"Player": "Health: 80/80\nEnergy: 3"})
+            input_path = os.path.join(tmp, "sts_input.txt")
+            env = TextTheSpireEnv(
+                state_dir=tmp,
+                input_file=input_path,
+                windows=["Player"],
+                max_turns=1,
+            )
+            env.reset()
+            env.step("1")  # triggers max_turns → done=True
+
+            # Remove the input file so any write attempt would fail
+            if os.path.exists(input_path):
+                os.remove(input_path)
+
+            # Step again — should not write a command or raise
+            _, _, done, _ = env.step("end")
+
+        assert done is True
+
+    def test_close_is_noop(self):
+        import tempfile
+        from environment.game_env import TextTheSpireEnv
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env = TextTheSpireEnv(
+                state_dir=tmp,
+                input_file=os.path.join(tmp, "sts_input.txt"),
+            )
+            env.close()  # should not raise
+
+
+# ---------------------------------------------------------------------------
+# make_env factory tests
+# ---------------------------------------------------------------------------
+
+
+class TestMakeEnv(unittest.TestCase):
+    def test_default_returns_sts_agent_env(self):
+        from environment.game_env import StsAgentEnv, make_env
+
+        env = make_env({})
+        assert isinstance(env, StsAgentEnv)
+
+    def test_sts_agent_mode_explicit(self):
+        from environment.game_env import StsAgentEnv, make_env
+
+        env = make_env({"interface_mode": "sts_agent"})
+        assert isinstance(env, StsAgentEnv)
+
+    def test_text_the_spire_mode(self):
+        import tempfile
+        from environment.game_env import TextTheSpireEnv, make_env
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env = make_env({
+                "interface_mode": "text_the_spire",
+                "text_the_spire_state_dir": tmp,
+                "text_the_spire_input_file": os.path.join(tmp, "sts_input.txt"),
+            })
+        assert isinstance(env, TextTheSpireEnv)
+
+    def test_unknown_mode_falls_back_to_sts_agent(self):
+        from environment.game_env import StsAgentEnv, make_env
+
+        env = make_env({"interface_mode": "unknown_value"})
+        assert isinstance(env, StsAgentEnv)
+
+    def test_make_env_passes_windows_and_max_turns(self):
+        from environment.game_env import StsAgentEnv, make_env
+
+        env = make_env({"windows": ["Player", "Hand"], "max_turns": 50})
+        assert isinstance(env, StsAgentEnv)
+        assert env.windows == ["Player", "Hand"]
+        assert env.max_turns == 50
+
+    def test_make_env_text_the_spire_passes_state_dir(self):
+        import tempfile
+        from environment.game_env import TextTheSpireEnv, make_env
+
+        with tempfile.TemporaryDirectory() as tmp:
+            env = make_env({
+                "interface_mode": "text_the_spire",
+                "text_the_spire_state_dir": tmp,
+                "text_the_spire_input_file": os.path.join(tmp, "sts_input.txt"),
+                "windows": ["Player"],
+                "max_turns": 10,
+            })
+            assert isinstance(env, TextTheSpireEnv)
+            assert env.state_dir == tmp
+            assert env.max_turns == 10
 
 
 if __name__ == "__main__":
