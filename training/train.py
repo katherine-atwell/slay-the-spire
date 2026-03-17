@@ -115,21 +115,9 @@ def _build_dataset(env_cfg: dict, n_episodes: int = 10, system_prompt: str = "")
     """
     import random
     from datasets import Dataset
-    from environment.game_env import StsAgentEnv
+    from environment.game_env import make_env
 
-    sts_tool_path = env_cfg.get("sts_tool_path", "sts-agent/src/sts_tool.py")
-    python_executable = env_cfg.get("python_executable", "python.exe")
-    windows = env_cfg.get("windows", None)
-    max_turns = env_cfg.get("max_turns", 200)
-    command_timeout = float(env_cfg.get("command_timeout", 5.0))
-
-    env = StsAgentEnv(
-        sts_tool_path=sts_tool_path,
-        python_executable=python_executable,
-        windows=windows,
-        max_turns=max_turns,
-        command_timeout=command_timeout,
-    )
+    env = make_env(env_cfg)
 
     # Simple random actions compatible with sts-agent.
     _random_actions = ["1", "2", "3", "4", "5", "end"]
