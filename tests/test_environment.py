@@ -420,6 +420,12 @@ class TestMakeEnv(unittest.TestCase):
         env = make_env({"interface_mode": "unknown_value"})
         assert isinstance(env, StsAgentEnv)
 
+    def test_communication_mod_mode(self):
+        from environment.game_env import CommunicationModEnv, make_env
+
+        env = make_env({"interface_mode": "communication_mod"})
+        assert isinstance(env, CommunicationModEnv)
+
     def test_make_env_passes_windows_and_max_turns(self):
         from environment.game_env import StsAgentEnv, make_env
 
@@ -443,6 +449,299 @@ class TestMakeEnv(unittest.TestCase):
             assert isinstance(env, TextTheSpireEnv)
             assert env.state_dir == tmp
             assert env.max_turns == 10
+
+
+# ---------------------------------------------------------------------------
+# CommunicationModEnv tests (stdin/stdout mocked with io.StringIO)
+# ---------------------------------------------------------------------------
+
+
+class TestCommunicationModEnv(unittest.TestCase):
+    """Tests for the CommunicationModEnv Communication Mod back-end."""
+
+    def _make_state_line(
+        self,
+        screen_type: str = "NONE",
+        current_hp: int = 80,
+        max_hp: int = 80,
+        floor: int = 1,
+        hand: list | None = None,
+        monsters: list | None = None,
+        choice_list: list | None = None,
+    ) -> str:
+        """Return a JSON line simulating a Communication Mod ready message."""
+        import json
+
+        combat_state: dict = {
+            "player": {"block": 0, "energy": 3, "powers": []},
+            "hand": hand or [],
+            "monsters": monsters or [],
+        }
+        game_state: dict = {
+            "screen_type": screen_type,
+            "current_hp": current_hp,
+            "max_hp": max_hp,
+            "gold": 99,
+            "floor": floor,
+            "act": 1,
+            "combat_state": combat_state,
+            "choice_list": choice_list or [],
+            "screen_state": {},
+        }
+        return json.dumps({"ready_for_command": True, "game_state": game_state}) + "\n"
+
+    def _make_env(self, lines: list[str], max_turns: int = 200):
+        """Build a CommunicationModEnv with mocked streams."""
+        import io
+        from environment.game_env import CommunicationModEnv
+
+        in_stream = io.StringIO("".join(lines))
+        out_stream = io.StringIO()
+        env = CommunicationModEnv(
+            max_turns=max_turns,
+            input_stream=in_stream,
+            output_stream=out_stream,
+        )
+        return env, out_stream
+
+    # ------------------------------------------------------------------
+    # reset / step lifecycle
+    # ------------------------------------------------------------------
+
+    def test_reset_returns_formatted_state(self):
+        line = self._make_state_line(
+            current_hp=80,
+            max_hp=80,
+            hand=[{"name": "Strike", "cost": 1}],
+        )
+        env, _ = self._make_env([line])
+        state = env.reset()
+
+        assert "=== Player ===" in state
+        assert "Health: 80/80" in state
+        assert "=== Hand ===" in state
+        assert "Strike" in state
+
+    def test_step_sends_json_command_and_reads_next_state(self):
+        import io
+        import json
+        from environment.game_env import CommunicationModEnv
+
+        state_line = self._make_state_line()
+        next_line = self._make_state_line(current_hp=75, max_hp=80)
+
+        in_stream = io.StringIO(state_line + next_line)
+        out_stream = io.StringIO()
+        env = CommunicationModEnv(input_stream=in_stream, output_stream=out_stream)
+        env.reset()
+
+        _, reward, done, info = env.step("end")
+        out_stream.seek(0)
+        written = [json.loads(ln) for ln in out_stream if ln.strip()]
+        assert any(cmd.get("command") == "end" for cmd in written)
+        assert isinstance(reward, float)
+        assert isinstance(done, bool)
+        assert info["turn"] == 1
+
+    def test_max_turns_ends_episode(self):
+        lines = [self._make_state_line() for _ in range(3)]
+        env, _ = self._make_env(lines, max_turns=1)
+        env.reset()
+        _, _, done, info = env.step("end")
+        assert done is True
+        assert info["turn"] == 1
+
+    def test_step_after_done_is_noop(self):
+        import io
+        import json
+        from environment.game_env import CommunicationModEnv
+
+        state_line = self._make_state_line()
+        in_stream = io.StringIO(state_line)
+        out_stream = io.StringIO()
+        env = CommunicationModEnv(max_turns=1, input_stream=in_stream, output_stream=out_stream)
+        env.reset()
+        env.step("end")  # max_turns reached → done=True
+
+        out_stream.seek(0)
+        cmds_before = out_stream.read()
+
+        # Second step should not send another command
+        env.step("end")
+        out_stream.seek(0)
+        cmds_after = out_stream.read()
+        assert cmds_before == cmds_after
+
+    def test_close_is_noop(self):
+        from environment.game_env import CommunicationModEnv
+        import io
+
+        env = CommunicationModEnv(input_stream=io.StringIO(), output_stream=io.StringIO())
+        env.close()  # must not raise
+
+    def test_eof_returns_empty_state(self):
+        from environment.game_env import CommunicationModEnv
+        import io
+
+        env = CommunicationModEnv(input_stream=io.StringIO(""), output_stream=io.StringIO())
+        state = env.reset()
+        assert isinstance(state, str)
+
+    # ------------------------------------------------------------------
+    # _format_game_state
+    # ------------------------------------------------------------------
+
+    def test_format_includes_monsters(self):
+        import json
+        import io
+        from environment.game_env import CommunicationModEnv
+
+        monsters = [
+            {
+                "name": "Cultist", "current_hp": 50, "max_hp": 50,
+                "intent": "DEBUFF", "block": 0, "is_gone": False,
+            }
+        ]
+        line = self._make_state_line(monsters=monsters)
+        env = CommunicationModEnv(input_stream=io.StringIO(line), output_stream=io.StringIO())
+        state = env.reset()
+        assert "=== Monster ===" in state
+        assert "Cultist" in state
+
+    def test_format_includes_choices(self):
+        import io
+        from environment.game_env import CommunicationModEnv
+
+        line = self._make_state_line(choice_list=["Strike", "Defend", "Bash"])
+        env = CommunicationModEnv(input_stream=io.StringIO(line), output_stream=io.StringIO())
+        state = env.reset()
+        assert "=== Choices ===" in state
+        assert "Bash" in state
+
+    def test_format_skips_dead_monsters(self):
+        import io
+        from environment.game_env import CommunicationModEnv
+
+        monsters = [
+            {"name": "Dead", "current_hp": 0, "max_hp": 50, "intent": "NONE", "block": 0, "is_gone": True},
+        ]
+        line = self._make_state_line(monsters=monsters)
+        env = CommunicationModEnv(input_stream=io.StringIO(line), output_stream=io.StringIO())
+        state = env.reset()
+        assert "Dead" not in state
+
+    # ------------------------------------------------------------------
+    # _translate_command
+    # ------------------------------------------------------------------
+
+    def test_translate_end(self):
+        from environment.game_env import CommunicationModEnv
+        import io
+
+        env = CommunicationModEnv(input_stream=io.StringIO(), output_stream=io.StringIO())
+        assert env._translate_command("end") == {"command": "end"}
+
+    def test_translate_proceed(self):
+        from environment.game_env import CommunicationModEnv
+        import io
+
+        env = CommunicationModEnv(input_stream=io.StringIO(), output_stream=io.StringIO())
+        assert env._translate_command("proceed") == {"command": "proceed"}
+        assert env._translate_command("confirm") == {"command": "proceed"}
+
+    def test_translate_choose(self):
+        from environment.game_env import CommunicationModEnv
+        import io
+
+        env = CommunicationModEnv(input_stream=io.StringIO(), output_stream=io.StringIO())
+        assert env._translate_command("choose 2") == {"command": "choose", "choice_index": 1}
+
+    def test_translate_numeric_combat(self):
+        from environment.game_env import CommunicationModEnv
+        import io
+
+        env = CommunicationModEnv(input_stream=io.StringIO(), output_stream=io.StringIO())
+        env._screen_type = "NONE"  # combat screen
+        assert env._translate_command("1") == {"command": "play", "hand_index": 0}
+        assert env._translate_command("3") == {"command": "play", "hand_index": 2}
+
+    def test_translate_numeric_combat_with_target(self):
+        from environment.game_env import CommunicationModEnv
+        import io
+
+        env = CommunicationModEnv(input_stream=io.StringIO(), output_stream=io.StringIO())
+        env._screen_type = "NONE"
+        assert env._translate_command("1 2") == {"command": "play", "hand_index": 0, "target_index": 1}
+
+    def test_translate_numeric_noncombat(self):
+        from environment.game_env import CommunicationModEnv
+        import io
+
+        env = CommunicationModEnv(input_stream=io.StringIO(), output_stream=io.StringIO())
+        env._screen_type = "MAP"
+        assert env._translate_command("2") == {"command": "choose", "choice_index": 1}
+
+    def test_translate_potion_use(self):
+        from environment.game_env import CommunicationModEnv
+        import io
+
+        env = CommunicationModEnv(input_stream=io.StringIO(), output_stream=io.StringIO())
+        assert env._translate_command("pot u 1") == {"command": "potion", "use": True, "slot": 0}
+        assert env._translate_command("pot u 2 1") == {"command": "potion", "use": True, "slot": 1, "target_index": 0}
+
+    def test_translate_potion_discard(self):
+        from environment.game_env import CommunicationModEnv
+        import io
+
+        env = CommunicationModEnv(input_stream=io.StringIO(), output_stream=io.StringIO())
+        assert env._translate_command("pot d 1") == {"command": "potion", "use": False, "slot": 0}
+
+    def test_translate_multi_action_uses_first(self):
+        from environment.game_env import CommunicationModEnv
+        import io
+
+        env = CommunicationModEnv(input_stream=io.StringIO(), output_stream=io.StringIO())
+        env._screen_type = "NONE"
+        result = env._translate_command("1,2,end")
+        assert result == {"command": "play", "hand_index": 0}
+
+    def test_translate_unknown_falls_back_to_proceed(self):
+        from environment.game_env import CommunicationModEnv
+        import io
+
+        env = CommunicationModEnv(input_stream=io.StringIO(), output_stream=io.StringIO())
+        assert env._translate_command("xyzzy") == {"command": "proceed"}
+
+    # ------------------------------------------------------------------
+    # _read_state skips non-ready messages
+    # ------------------------------------------------------------------
+
+    def test_read_state_skips_non_ready_messages(self):
+        import io
+        import json
+        from environment.game_env import CommunicationModEnv
+
+        informational = json.dumps({"ready_for_command": False, "in_game": True}) + "\n"
+        ready = self._make_state_line(current_hp=70, max_hp=80)
+        env = CommunicationModEnv(
+            input_stream=io.StringIO(informational + informational + ready),
+            output_stream=io.StringIO(),
+        )
+        state = env.reset()
+        assert "Health: 70/80" in state
+
+    def test_read_state_skips_malformed_json(self):
+        import io
+        from environment.game_env import CommunicationModEnv
+
+        bad_line = "not valid json\n"
+        ready = self._make_state_line()
+        env = CommunicationModEnv(
+            input_stream=io.StringIO(bad_line + ready),
+            output_stream=io.StringIO(),
+        )
+        state = env.reset()
+        assert isinstance(state, str)
 
 
 if __name__ == "__main__":
