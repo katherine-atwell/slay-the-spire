@@ -100,3 +100,11 @@ reward:
   hp_fraction_bonus_scale: 20.0  # max bonus for finishing with full HP
   enemy_killed_bonus: 5.0
   invalid_action_penalty: -2.0
+
+logging:
+  # Path for the per-game debug log file.
+  # Leave empty (or omit) to use the OS temporary directory:
+  #   Linux/macOS: /tmp/slay_the_spire_game.log
+  #   Windows:     %TEMP%\slay_the_spire_game.log
+  # The file is overwritten at the start of every new game episode.
+  log_file: ""
