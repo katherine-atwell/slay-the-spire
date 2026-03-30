@@ -57,7 +57,7 @@ environment:
   #                       stdin/stdout JSON.  The mod launches main.py as an
   #                       external process.  Works on macOS, Linux, and Windows.
   #                       Recommended for Mac users.
-  interface_mode: "sts_agent"
+  interface_mode: "communication_mod"
 
   # --- sts_agent mode settings ---
   # Path to the sts-agent CLI tool.
