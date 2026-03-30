@@ -48,11 +48,15 @@ training:
 
 environment:
   # Interface mode controls how the agent communicates with the game.
-  # "sts_agent"      — (default) use the sts-agent CLI tool via subprocess.
-  #                    Requires Windows and the sts-agent submodule.
-  # "text_the_spire" — read game-state files written by the Text the Spire mod
-  #                    and send commands via a shared input file.
-  #                    Works on Linux, macOS, and Windows (no Windows-only deps).
+  # "sts_agent"        — (default) use the sts-agent CLI tool via subprocess.
+  #                      Requires Windows and the sts-agent submodule.
+  # "text_the_spire"   — read game-state files written by the Text the Spire mod
+  #                      and send commands via a shared input file.
+  #                      Works on Linux, macOS, and Windows (no Windows-only deps).
+  # "communication_mod" — communicate with the Communication Mod via
+  #                       stdin/stdout JSON.  The mod launches main.py as an
+  #                       external process.  Works on macOS, Linux, and Windows.
+  #                       Recommended for Mac users.
   interface_mode: "sts_agent"
 
   # --- sts_agent mode settings ---
@@ -70,7 +74,13 @@ environment:
   # File that the Text the Spire mod monitors for incoming commands.
   text_the_spire_input_file: "sts_input.txt"
 
-  # Text the Spire windows to read on each step.
+  # --- communication_mod mode settings ---
+  # No extra settings are needed: the mod communicates via stdin/stdout.
+  # Configure the Communication Mod to launch:  python main.py
+  # See https://github.com/ForgottenArbiter/CommunicationMod for setup details.
+
+  # Text the Spire windows to read on each step (used by sts_agent and
+  # text_the_spire modes; ignored by communication_mod).
   windows:
     - "Player"
     - "Hand"
@@ -79,7 +89,8 @@ environment:
     - "Map"
   # Maximum number of turns before a game episode is forcibly ended.
   max_turns: 200
-  # Timeout (seconds) per command / file-poll operation.
+  # Timeout (seconds) per command / file-poll operation (sts_agent /
+  # text_the_spire modes only).
   command_timeout: 5.0
 
 reward:

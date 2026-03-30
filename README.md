@@ -123,12 +123,13 @@ env.close()
 slay-the-spire/
 ├── config.yaml              # Model, LoRA, training and reward hyperparameters
 ├── requirements.txt         # Python dependencies
+├── main.py                  # Communication Mod entry point (Mac-compatible)
 ├── agent/
 │   ├── agent.py             # SlayTheSpireAgent: wraps the LLM for action selection
 │   ├── model.py             # 4-bit quantised Llama 3.2:3B loading + LoRA setup
 │   └── system_prompt.py     # Game-mechanics system prompt + sts-agent command syntax
 ├── environment/
-│   └── game_env.py          # Gym-style env; supports sts_agent and text_the_spire modes
+│   └── game_env.py          # Gym-style env; supports sts_agent, text_the_spire, and communication_mod modes
 ├── training/
 │   ├── reward.py            # Composable reward functions
 │   └── train.py             # GRPO training entry point
@@ -140,7 +141,7 @@ slay-the-spire/
 
 ## Interface modes
 
-The agent can communicate with Slay the Spire in two ways, controlled by
+The agent can communicate with Slay the Spire in three ways, controlled by
 `environment.interface_mode` in `config.yaml`.
 
 ### `sts_agent` (default, Windows only)
@@ -187,16 +188,49 @@ The mod writes one `.txt` file per window (e.g. `Player.txt`, `Hand.txt`,
 `Monster.txt`, `Choices.txt`, `Map.txt`) and the agent writes the chosen
 action as a single line to `sts_input.txt`.
 
+### `communication_mod` (cross-platform, **recommended for Mac**)
+
+Communicates with the
+[Communication Mod](https://github.com/ForgottenArbiter/CommunicationMod) via
+**stdin/stdout JSON**.  The mod launches `main.py` as an external process on
+startup; game state is piped to the script's stdin and commands are written
+back to stdout.  This back-end has **no platform-specific dependencies** and
+works on **macOS, Linux, and Windows**.
+
+Set up:
+
+1. Install the [Communication Mod](https://github.com/ForgottenArbiter/CommunicationMod)
+   for Slay the Spire (follow its README).
+2. Configure the mod to run `python main.py` (point it at the absolute path if
+   needed).
+3. Update `config.yaml` (optional — `main.py` forces this mode automatically):
+
+```yaml
+environment:
+  interface_mode: "communication_mod"
+```
+
+When Slay the Spire starts with the Communication Mod active, the mod will
+launch `main.py`, which:
+
+1. Loads `config.yaml` (pass `--config /path/to/config.yaml` to override).
+2. Loads the quantised LLM model and optional LoRA adapter.
+3. Connects to the mod via stdin/stdout.
+4. Plays one episode, logging progress to stderr.
+
 ## Requirements
 
 - **Windows** required only for the default `sts_agent` interface mode
   (sts-agent uses pywinauto/pywin32 for UI automation).  The
-  `text_the_spire` mode works on any OS.
+  `text_the_spire` and `communication_mod` modes work on any OS including
+  **macOS**.
   On WSL, invoke sts-agent with `python.exe` (the Windows Python).
 - Python 3.10 or later
 - ~64 GB RAM (the 4-bit model uses ~1.7 GB for weights; the rest is for
   activations, the LoRA adapter, and the training loop)
-- Slay the Spire with [Text the Spire mod](https://github.com/Wensber/TextTheSpire) installed and running
+- Slay the Spire with the appropriate mod installed and running:
+  - `sts_agent` / `text_the_spire` modes: [Text the Spire mod](https://github.com/Wensber/TextTheSpire)
+  - `communication_mod` mode: [Communication Mod](https://github.com/ForgottenArbiter/CommunicationMod)
 
 ### Python packages
 
